@@ -71,24 +71,32 @@
             mkDerivation,
             base,
             bytestring,
+            containers,
             crypton,
             directory,
+            filepath,
+            memory,
             optparse-applicative,
-            process,
+            random,
+            text,
           }:
           mkDerivation {
             pname = "obfuscator";
-            version = "0.1.0.0";
+            version = "1.0.0.0";
             src = ./.;
             isLibrary = false;
             isExecutable = true;
             executableHaskellDepends = [
               base
               bytestring
+              containers
               crypton
               directory
+              filepath
+              memory
               optparse-applicative
-              process
+              random
+              text
             ];
             license = lib.licenses.gpl3Only;
             mainProgram = "obfuscator";
