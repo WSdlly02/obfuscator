@@ -18,7 +18,7 @@ name: obfuscator
 -- PVP summary:     +-+------- breaking API changes
 --                  | | +----- non-breaking API additions
 --                  | | | +--- code changes with no API change
-version: 1.0.0.0
+version: 1.1.0.0
 -- A short (one-line) description of the package.
 -- synopsis:
 -- A longer description of the package.
@@ -57,7 +57,6 @@ executable obfuscator
   -- other-modules:
   -- LANGUAGE extensions used by modules in this package.
   other-extensions:
-    LambdaCase
     OverloadedStrings
 
   -- Other library packages from which modules are imported.
