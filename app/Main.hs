@@ -1,4 +1,3 @@
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 import Control.Applicative (optional)
@@ -11,9 +10,11 @@ import Crypto.Random (getRandomBytes)
 
 import Data.ByteArray qualified as BA
 import Data.ByteString qualified as BS
-import Data.ByteString.Char8 qualified as BS.C
-import Data.Char (isAscii)
 import Data.Map qualified as Map
+import Data.Text qualified as T
+import Data.Text.Encoding qualified as T.E
+import Data.Text.IO qualified as T.IO
+import Data.Text.Read qualified as T.R
 import Options.Applicative qualified as OA
 import System.Directory (
   createDirectoryIfMissing,
@@ -22,36 +23,21 @@ import System.Directory (
   getHomeDirectory,
  )
 import System.FilePath (normalise, takeDirectory, (</>))
-import Text.Read (readMaybe)
-
--- | 定义程序的四种工作模式
-data Mode = Port | Password | Id | Other deriving (Show, Eq)
 
 -- | 定义命令行选项的数据结构
 data Options = Options
-  { optMode :: Maybe Mode
+  { optMode :: Maybe T.Text
   , optLength :: Maybe Int
   , optKeyPath :: Maybe FilePath
   , optOutputPath :: Maybe FilePath
-  , optInput :: BS.ByteString
+  , optInput :: T.Text
   }
   deriving (Show)
 
--- | 将字符串解析为 Mode
-modeReader :: OA.ReadM Mode
-modeReader =
-  (OA.str :: OA.ReadM BS.ByteString) >>= \case
-    "port" -> return Port
-    "password" -> return Password
-    "id" -> return Id
-    "other" -> return Other
-    _ -> OA.readerError "Invalid mode. Use 'port', 'password', 'id', or 'other'."
-
-optModeParser :: OA.Parser (Maybe Mode)
+optModeParser :: OA.Parser (Maybe T.Text)
 optModeParser =
   optional
-    ( OA.option
-        modeReader
+    ( OA.strOption
         ( OA.long "mode"
             <> OA.short 'm'
             <> OA.metavar "MODE"
@@ -89,7 +75,7 @@ optOutputPathParser homeDir =
             <> OA.help ("Path to the output file. Default: " ++ homeDir </> "Documents" </> "obfuscator-list.txt")
         )
     )
-optInputParser :: OA.Parser BS.ByteString
+optInputParser :: OA.Parser T.Text
 optInputParser =
   OA.strArgument
     ( OA.metavar "INPUT"
@@ -122,7 +108,7 @@ getKey keyPath = do
     then do
       content <- BS.readFile keyPath
       when (BS.length content > 4096) $
-        BS.putStr "Warning: Key file content exceeds 4096 bytes.\n"
+        putStrLn "Warning: Key file content exceeds 4096 bytes."
       when (BS.null content) $
         fail $
           "Error: Key file is empty: " ++ keyPath
@@ -136,31 +122,30 @@ getKey keyPath = do
       return newKey
 
 -- | 将结果输出到控制台和文件
-writeOutput :: Mode -> FilePath -> BS.ByteString -> BS.ByteString -> IO ()
+writeOutput :: T.Text -> FilePath -> T.Text -> T.Text -> IO ()
 writeOutput mode outputPath input result = do
   createDirectoryIfMissing True (takeDirectory outputPath) -- 确保写入文件目录存在，无论文件本身
   outputPathIsDir <- doesDirectoryExist outputPath -- 检查写入文件是否为文件夹 (检查前文件夹已创建)
   -- 不用检查写入文件存在
   let newOutputPath = if outputPathIsDir then outputPath </> "obfuscator-list.txt" else outputPath -- 若为文件夹，则添加文件名路径
-  let content = BS.concat ["Mode: ", BS.C.pack . show $ mode, ", Input: ", input, ", Output: ", result, "\n"]
-  BS.appendFile newOutputPath content
+  let content = T.concat ["Mode: ", mode, ", Input: ", input, ", Output: ", result, "\n"]
+  T.IO.appendFile newOutputPath content
   putStrLn $ "Result appended to: " ++ newOutputPath
 
--- | 【重写】模式实现：生成安全端口号 (1024-65535)
-generatePort :: BS.ByteString -> BS.ByteString -> IO BS.ByteString
+-- | 生成安全端口号 (1024-65535)
+generatePort :: T.Text -> BS.ByteString -> IO T.Text
 generatePort input hashedInput = do
-  let maybePort = readMaybe . BS.C.unpack $ input :: Maybe Int
+  let maybePort = T.R.decimal input :: Either String (Int, T.Text)
   case maybePort of
-    Just p | p < 0 || p > 65535 -> fail "Error: Port number must be between 0 and 65535."
-    Just _ -> do
-      let largeInteger :: Int = BS.foldl' (\acc w -> acc * 256 + fromIntegral w) 0 (BS.take 8 hashedInput)
+    Right (p, x) | p > 0 && p < 65535 && T.null x -> do
+      let largeInt :: Int = BS.foldl' (\acc w -> acc * 256 + fromIntegral w) 0 (BS.take 8 hashedInput)
       let portRange = 65535 - 1024 + 1
-      let newPort = 1024 + (largeInteger `mod` portRange)
-      return . BS.C.pack . show $ newPort
-    _ -> fail "Error: Port input must be a valid number."
+      let newPort = 1024 + (largeInt `mod` portRange)
+      return . T.pack . show $ newPort
+    _ -> fail "Error: Port input must be a valid number which between 0 and 65535."
 
--- | 【新增】为 Other 模式生成纯字母数字字符串
-generateAlphaNumString :: Int -> BS.ByteString -> BS.ByteString
+-- | 为 Other 模式生成纯字母数字字符串
+generateAlphaNumString :: Int -> BS.ByteString -> T.Text
 generateAlphaNumString len hashedInput =
   let
     alphaNum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" :: BS.ByteString
@@ -170,19 +155,19 @@ generateAlphaNumString len hashedInput =
       let byte = hashedInput `BS.index` (idx `mod` hashLen)
        in alphaNum `BS.index` (fromIntegral byte `mod` BS.length alphaNum)
    in
-    BS.pack [byteToChar i | i <- [0 .. len - 1]]
+    T.E.decodeUtf8 . BS.pack $ [byteToChar i | i <- [0 .. len - 1]]
 
--- | 【新增】为 Password 模式生成包含2个特殊字符的密码
-generatePasswordString :: Int -> BS.ByteString -> BS.ByteString
-generatePasswordString len rawHashedInput =
+-- | 为 Password 模式生成包含2个特殊字符的密码
+generatePasswordString :: Int -> BS.ByteString -> T.Text
+generatePasswordString len hashedInput =
   let
-    specialChars = "!@#$%^&*()-+/" :: BS.ByteString
+    specialChars = "!@#$%^&*" :: BS.ByteString
     alphaNum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" :: BS.ByteString
-    hashLen = BS.length rawHashedInput
+    hashLen = BS.length hashedInput
 
     -- 辅助函数，用于安全地从哈希字节中获取一个值
     getByte :: Int -> Int
-    getByte idx = fromIntegral $ rawHashedInput `BS.index` (idx `mod` hashLen)
+    getByte idx = fromIntegral $ hashedInput `BS.index` (idx `mod` hashLen)
 
     -- 1. 确定两个不重复的、用于插入特殊字符的位置
     pos1 = getByte 0 `mod` len
@@ -204,19 +189,19 @@ generatePasswordString len rawHashedInput =
         Just spChar -> spChar -- 如果当前位置是特殊字符位，则使用Map中的特殊字符
         Nothing -> alphaNum `BS.index` (getByte (i + 4) `mod` BS.length alphaNum) -- 否则，生成一个字母数字字符
    in
-    BS.pack [generateChar i | i <- [0 .. len - 1]]
+    T.E.decodeUtf8 . BS.pack $ [generateChar i | i <- [0 .. len - 1]]
 
 -- | 【修正】为 Id 模式生成专用字符串，确保前两位是字母
-generateIdString :: Int -> BS.ByteString -> BS.ByteString
-generateIdString len rawHashedInput =
+generateIdString :: Int -> BS.ByteString -> T.Text
+generateIdString len hashedInput =
   let
     letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ" :: BS.ByteString
     alphaNum = BS.append letters "0123456789"
-    hashLen = BS.length rawHashedInput
+    hashLen = BS.length hashedInput
 
     -- 安全地从字节生成字符，使用取模来模拟循环，防止越界
     byteToChar charSet idx =
-      let byte = rawHashedInput `BS.index` (idx `mod` hashLen)
+      let byte = hashedInput `BS.index` (idx `mod` hashLen)
        in charSet `BS.index` (fromIntegral byte `mod` BS.length charSet)
 
     -- 生成ID的各个部分
@@ -224,34 +209,39 @@ generateIdString len rawHashedInput =
     char2 = byteToChar letters 1
     rest = [byteToChar alphaNum i | i <- [2 .. len - 1]]
    in
-    BS.pack $ char1 : char2 : rest
+    T.E.decodeUtf8 . BS.concat $ [BS.singleton char1, BS.singleton char2, BS.pack rest]
 
--- | 【重写】根据模式处理哈希值并生成最终结果
-mainGenerator :: Mode -> Int -> BS.ByteString -> BS.ByteString -> IO BS.ByteString
-mainGenerator Port _ input hashedInput = generatePort input hashedInput
-mainGenerator Password len _ hashedInput = return $ generatePasswordString len hashedInput
-mainGenerator Id len _ hashedInput = return $ generateIdString len hashedInput
-mainGenerator Other len _ hashedInput = return $ generateAlphaNumString len hashedInput
+-- | 根据模式处理哈希值并生成最终结果
+mainGenerator :: T.Text -> Int -> T.Text -> BS.ByteString -> IO T.Text
+mainGenerator "port" _ input hashedInput = generatePort input hashedInput
+mainGenerator "password" len _ hashedInput = return $ generatePasswordString len hashedInput
+mainGenerator "id" len _ hashedInput = return $ generateIdString len hashedInput
+mainGenerator "other" len _ hashedInput = return $ generateAlphaNumString len hashedInput
+mainGenerator _ _ _ _ = fail "Error: Not a valid mode"
 
--- | 主函数
 main :: IO ()
 main = do
   homeDir <- getHomeDirectory
   opts <- OA.execParser (optMainParser homeDir)
 
   finalMode <- case optMode opts of
-    Just x -> return x
-    Nothing -> return Id
+    Just "port" -> return "port"
+    Just "password" -> return "password"
+    Just "id" -> return "id"
+    Just "other" -> return "other"
+    Nothing -> return "id"
+    _ -> fail "Invalid mode. Use 'port', 'password', 'id', or 'other'."
 
   finalLength <- case optLength opts of
-    Just _ | finalMode == Port -> fail "Error: Cannot specify length for 'Port'"
+    Just _ | finalMode == "port" -> fail "Error: Cannot specify length for 'Port'"
     Just x | x < 4 || x > 128 -> fail "Error: Length must be between 4 and 128."
     Just x -> return x
     Nothing -> case finalMode of
-      Port -> return 4 -- Port模式不使用此长度，仅为占位
-      Password -> return 16
-      Id -> return 8
-      Other -> return 16
+      "port" -> return 4
+      "password" -> return 16
+      "id" -> return 8
+      "other" -> return 16
+      _ -> fail "Error: Not a valid mode"
 
   finalKeyPath <- case optKeyPath opts of
     Just x -> return . normalise $ x
@@ -262,15 +252,15 @@ main = do
     Nothing -> return $ homeDir </> "Documents" </> "obfuscator-list.txt"
 
   finalInput <- case optInput opts of
-    x | all isAscii (BS.C.unpack x) -> case finalMode of
-      Password -> return $ BS.append x "-password"
+    x | T.isAscii x -> case finalMode of
+      "password" -> return $ T.append x "-password"
       _ -> return x
     _ -> fail "Error: INPUT is not ASCII character."
 
   key <- getKey finalKeyPath
 
-  let hashedInput = BA.convert (hmac key finalInput :: HMAC SHA512)
+  let hashedInput = BA.convert (hmac key (T.E.encodeUtf8 finalInput) :: HMAC SHA512)
   result <- mainGenerator finalMode finalLength finalInput hashedInput
 
-  BS.putStr . BS.concat $ ["Mode: ", BS.C.pack . show $ finalMode, "\nInput: ", optInput opts, "\nOutput: ", result, "\n\n"]
+  T.IO.putStrLn . T.concat $ ["Mode: ", finalMode, "\nInput: ", optInput opts, "\nOutput: ", result]
   writeOutput finalMode finalOutputPath (optInput opts) result
